@@ -1,0 +1,698 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Backtest Chart</title>
+  <!-- lightweight-charts standalone bundle -->
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <h3>Backtest Chart</h3>
+  <div style="display: flex; gap: 20px;">
+    <div style="position: relative;">
+      <div id="chart" style="width: 1000px; height: 500px;"></div>
+      <canvas id="overlay-canvas" style="position: absolute; top: 0; left: 0; width: 1000px; height: 500px; pointer-events: none;"></canvas>
+      
+      <!-- controls -->
+      <div style="margin-top: 10px;">
+        <button id="btn-load">Load</button>
+        <button id="btn-start">Start</button>
+        <button id="btn-stop">Stop</button>
+        Speed: <input id="speed" type="number" value="1" min="0.1" step="0.1" style="width:80px"/>
+      </div>
+      
+      <!-- Trading controls -->
+      <div style="margin-top: 10px; padding: 10px; border: 1px solid #ccc; background: #f9f9f9;">
+        <h4 style="margin-top: 0;">Trading Setup</h4>
+        <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+          <button id="btn-buy" style="background: #26a69a; color: white; padding: 10px 20px; cursor: pointer; border: none; border-radius: 4px; font-weight: bold;">
+            📈 LONG
+          </button>
+          <button id="btn-sell" style="background: #ef5350; color: white; padding: 10px 20px; cursor: pointer; border: none; border-radius: 4px; font-weight: bold;">
+            📉 SHORT
+          </button>
+          <button id="btn-close-all" style="padding: 10px 20px; border-radius: 4px;">Close All</button>
+        </div>
+        
+        <div id="order-setup-panel" style="display: none; background: white; padding: 10px; border: 2px solid #666; border-radius: 4px;">
+          <div style="margin-bottom: 8px;">
+            <label style="display: inline-block; width: 80px; font-weight: bold;">Entry:</label>
+            <input id="entry-price" type="number" step="0.01" style="width: 100px;" readonly/>
+            <span style="margin-left: 10px; color: #666; font-size: 12px;">Click chart to set</span>
+          </div>
+          <div style="margin-bottom: 8px;">
+            <label style="display: inline-block; width: 80px; font-weight: bold; color: #26a69a;">Take Profit:</label>
+            <input id="tp-price" type="number" step="0.01" style="width: 100px;"/>
+            <span id="tp-pips" style="margin-left: 10px; color: #26a69a; font-size: 12px;"></span>
+          </div>
+          <div style="margin-bottom: 8px;">
+            <label style="display: inline-block; width: 80px; font-weight: bold; color: #ef5350;">Stop Loss:</label>
+            <input id="sl-price" type="number" step="0.01" style="width: 100px;"/>
+            <span id="sl-pips" style="margin-left: 10px; color: #ef5350; font-size: 12px;"></span>
+          </div>
+          <div style="margin-bottom: 8px;">
+            <label style="display: inline-block; width: 80px;">Quantity:</label>
+            <input id="quantity" type="number" value="1" min="0.01" step="0.01" style="width: 100px;"/>
+          </div>
+          <div style="margin-bottom: 8px; padding: 5px; background: #f0f0f0; border-radius: 3px;">
+            <strong>Risk/Reward: </strong><span id="rr-ratio" style="font-size: 14px; color: #666;">-</span>
+          </div>
+          <div style="display: flex; gap: 10px; margin-top: 10px;">
+            <button id="btn-confirm-order" style="background: #4CAF50; color: white; padding: 8px 20px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">
+              ✓ Confirm Order
+            </button>
+            <button id="btn-cancel-order" style="background: #ff9800; color: white; padding: 8px 20px; border: none; border-radius: 4px; cursor: pointer;">
+              ✖ Cancel
+            </button>
+          </div>
+        </div>
+        
+        <div id="order-status" style="margin-top: 10px; font-size: 12px; color: #666; font-style: italic;"></div>
+      </div>
+    </div>
+    
+    <!-- Position panel -->
+    <div style="flex: 1; padding: 10px; border: 1px solid #ccc;">
+      <h4>Positions</h4>
+      <div id="positions-list" style="font-family: monospace; font-size: 12px;"></div>
+      <hr/>
+      <div id="pnl-summary" style="font-weight: bold;"></div>
+    </div>
+  </div>
+
+  <script>
+    const chart = LightweightCharts.createChart(document.getElementById("chart"), { 
+      width: 1000, 
+      height: 500,
+      handleScroll: { mouseWheel: true, pressedMouseMove: true },
+      handleScale: { mouseWheel: true, pinch: true }
+    });
+    const candleSeries = chart.addCandlestickSeries();
+    
+    // Canvas overlay for drawing zones
+    const canvas = document.getElementById('overlay-canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = 1000;
+    canvas.height = 500;
+    
+    // Trading state
+    let positions = [];
+    let currentPrice = 0;
+    let markers = [];
+    let pendingOrderMode = null; // 'buy' or 'sell'
+    let wasRunningBeforeOrder = false;
+    let isChartRunning = false; // Track chart running state
+    
+    // Order setup lines
+    let entryLine = null;
+    let tpLine = null;
+    let slLine = null;
+    let entryPrice = null;
+    let tpPrice = null;
+    let slPrice = null;
+    
+    // Store price lines for each position
+    let positionLines = {};
+    
+    function priceToPixel(price) {
+      try {
+        const y = candleSeries.priceToCoordinate(price);
+        return y;
+      } catch (e) {
+        return null;
+      }
+    }
+    
+    function drawZones() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      if (positions.length === 0) return;
+      
+      positions.forEach(pos => {
+        const entry = parseFloat(pos.entry_price);
+        const tp = pos.tp ? parseFloat(pos.tp) : null;
+        const sl = pos.sl ? parseFloat(pos.sl) : null;
+        
+        try {
+          const entryY = candleSeries.priceToCoordinate(entry);
+          
+          // Draw profit zone (green)
+          if (tp && entryY !== null && entryY !== undefined) {
+            const tpY = candleSeries.priceToCoordinate(tp);
+            if (tpY !== null && tpY !== undefined) {
+              const topY = Math.min(entryY, tpY);
+              const height = Math.abs(entryY - tpY);
+              
+              // Fill green zone
+              ctx.fillStyle = 'rgba(76, 175, 80, 0.2)';
+              ctx.fillRect(50, topY, canvas.width - 100, height);
+              
+              // Add dashed border
+              ctx.strokeStyle = 'rgba(76, 175, 80, 0.4)';
+              ctx.lineWidth = 1;
+              ctx.setLineDash([5, 5]);
+              ctx.strokeRect(50, topY, canvas.width - 100, height);
+              ctx.setLineDash([]);
+            }
+          }
+          
+          // Draw risk zone (red)
+          if (sl && entryY !== null && entryY !== undefined) {
+            const slY = candleSeries.priceToCoordinate(sl);
+            if (slY !== null && slY !== undefined) {
+              const topY = Math.min(entryY, slY);
+              const height = Math.abs(entryY - slY);
+              
+              // Fill red zone
+              ctx.fillStyle = 'rgba(244, 67, 54, 0.2)';
+              ctx.fillRect(50, topY, canvas.width - 100, height);
+              
+              // Add dashed border
+              ctx.strokeStyle = 'rgba(244, 67, 54, 0.4)';
+              ctx.lineWidth = 1;
+              ctx.setLineDash([5, 5]);
+              ctx.strokeRect(50, topY, canvas.width - 100, height);
+              ctx.setLineDash([]);
+            }
+          }
+        } catch (e) {
+          console.error('Error drawing zones:', e);
+        }
+      });
+    }
+    
+    // Redraw zones on chart changes
+    chart.timeScale().subscribeVisibleLogicalRangeChange(drawZones);
+    
+    // Redraw periodically to handle all chart interactions
+    setInterval(drawZones, 100);
+
+    const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/socket');
+
+    ws.onopen = () => {
+      console.log('ws open');
+    }
+
+    ws.onclose = (ev) => {
+      console.error('ws closed:', ev.code, ev.reason);
+    }
+
+    ws.onerror = (err) => {
+      console.error('ws error:', err);
+    }
+
+    ws.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'candle') {
+        const c = msg.data;
+        candleSeries.update({
+          time: c.time,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close
+        });
+        currentPrice = c.close;
+        updatePnL();
+        drawZones(); // Redraw zones on each candle update
+      } else if (msg.status === 'started') {
+        isChartRunning = true;
+        console.log('Chart started');
+      } else if (msg.status === 'stopped') {
+        isChartRunning = false;
+        console.log('Chart stopped');
+      } else if (msg.type === 'order_placed') {
+        positions.push(msg.position);
+        addMarker(msg.position);
+        updatePositionList();
+        // Clear pending order mode
+        if (pendingOrderMode) {
+          clearOrderLines();
+          pendingOrderMode = null;
+          document.getElementById('order-setup-panel').style.display = 'none';
+          document.getElementById('order-status').innerHTML = '✅ Order placed!';
+          document.getElementById('entry-price').value = '';
+          document.getElementById('tp-price').value = '';
+          document.getElementById('sl-price').value = '';
+          updateButtonStates();
+          
+          // Resume chart if it was running before
+          setTimeout(() => {
+            if (wasRunningBeforeOrder) {
+              console.log('Resuming chart after order placement');
+              ws.send(JSON.stringify({ action: 'start' }));
+              wasRunningBeforeOrder = false;
+            } else {
+              console.log('Not resuming - chart was not running before');
+            }
+          }, 200); // Small delay to ensure order is processed
+          
+          setTimeout(() => {
+            document.getElementById('order-status').innerHTML = '';
+          }, 2000);
+        }
+      } else if (msg.type === 'position_hit') {
+        // Position hit TP or SL - remove from positions and update display
+        const idx = positions.findIndex(p => p.id === msg.position_id);
+        if (idx !== -1) {
+          const pos = positions[idx];
+          positions.splice(idx, 1);
+          
+          // Remove price lines for this position
+          if (positionLines[msg.position_id]) {
+            const lines = positionLines[msg.position_id];
+            if (lines.entry) candleSeries.removePriceLine(lines.entry);
+            if (lines.tp) candleSeries.removePriceLine(lines.tp);
+            if (lines.sl) candleSeries.removePriceLine(lines.sl);
+            delete positionLines[msg.position_id];
+          }
+          
+          // Add exit marker
+          const exitMarker = {
+            time: currentPrice ? Math.floor(Date.now() / 1000) : pos.time + 10,
+            position: msg.reason === 'TP' ? 'aboveBar' : 'belowBar',
+            color: msg.reason === 'TP' ? '#4CAF50' : '#F44336',
+            shape: msg.reason === 'TP' ? 'circle' : 'circle',
+            text: `${msg.reason} ${msg.pnl >= 0 ? '+' : ''}${msg.pnl.toFixed(2)}`
+          };
+          markers.push(exitMarker);
+          candleSeries.setMarkers(markers);
+          
+          updatePositionList();
+          drawZones();
+          
+          // Show notification
+          document.getElementById('order-status').innerHTML = 
+            `${msg.reason === 'TP' ? '✅' : '⛔'} Position closed at ${msg.reason}: P&L ${msg.pnl >= 0 ? '+' : ''}${msg.pnl.toFixed(2)}`;
+          setTimeout(() => {
+            document.getElementById('order-status').innerHTML = '';
+          }, 3000);
+        }
+      } else if (msg.type === 'backtest_stats') {
+        // Display backtest statistics
+        const stats = msg.stats;
+        alert(`Backtest Complete!\n\nTotal Trades: ${stats.total_trades}\nWins: ${stats.wins}\nLosses: ${stats.losses}\nWin Rate: ${stats.win_rate.toFixed(2)}%\nTotal P&L: ${stats.total_pnl.toFixed(2)}`);
+      } else if (msg.type === 'position_closed') {
+        const idx = positions.findIndex(p => p.id === msg.position_id);
+        if (idx !== -1) positions.splice(idx, 1);
+        updatePositionList();
+        drawZones();
+      } else if (msg.type === 'position_closed_manual') {
+        // Manual close - remove lines and show P&L
+        const idx = positions.findIndex(p => p.id === msg.position_id);
+        if (idx !== -1) {
+          const pos = positions[idx];
+          
+          // Remove price lines for this position
+          if (positionLines[msg.position_id]) {
+            const lines = positionLines[msg.position_id];
+            if (lines.entry) candleSeries.removePriceLine(lines.entry);
+            if (lines.tp) candleSeries.removePriceLine(lines.tp);
+            if (lines.sl) candleSeries.removePriceLine(lines.sl);
+            delete positionLines[msg.position_id];
+          }
+          
+          // Add exit marker
+          const exitMarker = {
+            time: Math.floor(Date.now() / 1000),
+            position: 'aboveBar',
+            color: msg.pnl >= 0 ? '#2196F3' : '#FF9800',
+            shape: 'circle',
+            text: `Close ${msg.pnl >= 0 ? '+' : ''}${msg.pnl.toFixed(2)}`
+          };
+          markers.push(exitMarker);
+          candleSeries.setMarkers(markers);
+          
+          // Show notification
+          document.getElementById('order-status').innerHTML = 
+            `⚪ Position closed manually: P&L ${msg.pnl >= 0 ? '+' : ''}${msg.pnl.toFixed(2)}`;
+          setTimeout(() => {
+            document.getElementById('order-status').innerHTML = '';
+          }, 3000);
+        }
+        drawZones();
+      } else {
+        console.log(msg);
+      }
+    };
+    
+    // Trading functions
+    function placeOrder(side) {
+      const qty = parseFloat(document.getElementById('quantity').value);
+      ws.send(JSON.stringify({ 
+        action: 'place_order', 
+        side: side, 
+        quantity: qty,
+        price: currentPrice 
+      }));
+    }
+    
+    function enablePendingOrder(side) {
+      // Check if chart is currently running and pause it
+      if (isChartRunning) {
+        ws.send(JSON.stringify({ action: 'stop' }));
+        wasRunningBeforeOrder = true;
+        console.log('Chart was running, pausing and will resume after order');
+      } else {
+        wasRunningBeforeOrder = false;
+        console.log('Chart was not running, will not auto-resume');
+      }
+      
+      pendingOrderMode = side;
+      document.getElementById('order-setup-panel').style.display = 'block';
+      document.getElementById('order-status').innerHTML = 
+        `<strong>🎯 Step 1: Click on chart to set ${side === 'buy' ? 'LONG' : 'SHORT'} entry price</strong>`;
+      updateButtonStates();
+      
+      // Clear previous lines
+      clearOrderLines();
+    }
+    
+    function clearOrderLines() {
+      if (entryLine) {
+        candleSeries.removePriceLine(entryLine);
+        entryLine = null;
+      }
+      if (tpLine) {
+        candleSeries.removePriceLine(tpLine);
+        tpLine = null;
+      }
+      if (slLine) {
+        candleSeries.removePriceLine(slLine);
+        slLine = null;
+      }
+      entryPrice = null;
+      tpPrice = null;
+      slPrice = null;
+    }
+    
+    function cancelPendingOrder() {
+      clearOrderLines();
+      pendingOrderMode = null;
+      document.getElementById('order-setup-panel').style.display = 'none';
+      document.getElementById('order-status').innerHTML = '';
+      document.getElementById('entry-price').value = '';
+      document.getElementById('tp-price').value = '';
+      document.getElementById('sl-price').value = '';
+      updateButtonStates();
+      
+      // Resume chart if it was running
+      if (wasRunningBeforeOrder) {
+        ws.send(JSON.stringify({ action: 'start' }));
+        wasRunningBeforeOrder = false;
+      }
+    }
+    
+    function setEntryPrice(price) {
+      entryPrice = price;
+      document.getElementById('entry-price').value = price.toFixed(2);
+      
+      // Create entry line
+      if (entryLine) candleSeries.removePriceLine(entryLine);
+      entryLine = candleSeries.createPriceLine({
+        price: price,
+        color: pendingOrderMode === 'buy' ? '#2196F3' : '#FF5722',
+        lineWidth: 2,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: 'Entry'
+      });
+      
+      // Auto set TP/SL based on entry
+      const defaultRisk = price * 0.02; // 2% risk
+      if (pendingOrderMode === 'buy') {
+        tpPrice = price + defaultRisk * 2; // 2:1 R/R
+        slPrice = price - defaultRisk;
+      } else {
+        tpPrice = price - defaultRisk * 2;
+        slPrice = price + defaultRisk;
+      }
+      
+      document.getElementById('tp-price').value = tpPrice.toFixed(2);
+      document.getElementById('sl-price').value = slPrice.toFixed(2);
+      
+      updateTPSLLines();
+      updateRRRatio();
+      
+      document.getElementById('order-status').innerHTML = 
+        '<strong>✓ Entry set. Adjust TP/SL if needed, then click Confirm</strong>';
+    }
+    
+    function updateTPSLLines() {
+      if (!entryPrice) return;
+      
+      // Update TP line
+      if (tpLine) candleSeries.removePriceLine(tpLine);
+      if (tpPrice) {
+        tpLine = candleSeries.createPriceLine({
+          price: tpPrice,
+          color: '#4CAF50',
+          lineWidth: 2,
+          lineStyle: 0,
+          axisLabelVisible: true,
+          title: 'TP'
+        });
+      }
+      
+      // Update SL line
+      if (slLine) candleSeries.removePriceLine(slLine);
+      if (slPrice) {
+        slLine = candleSeries.createPriceLine({
+          price: slPrice,
+          color: '#F44336',
+          lineWidth: 2,
+          lineStyle: 0,
+          axisLabelVisible: true,
+          title: 'SL'
+        });
+      }
+    }
+    
+    function updateRRRatio() {
+      if (!entryPrice || !tpPrice || !slPrice) {
+        document.getElementById('rr-ratio').textContent = '-';
+        document.getElementById('tp-pips').textContent = '';
+        document.getElementById('sl-pips').textContent = '';
+        return;
+      }
+      
+      const risk = Math.abs(entryPrice - slPrice);
+      const reward = Math.abs(tpPrice - entryPrice);
+      const rrRatio = (reward / risk).toFixed(2);
+      
+      document.getElementById('rr-ratio').textContent = `1:${rrRatio}`;
+      document.getElementById('rr-ratio').style.color = rrRatio >= 2 ? '#4CAF50' : '#F44336';
+      
+      document.getElementById('tp-pips').textContent = `+${reward.toFixed(2)} pts`;
+      document.getElementById('sl-pips').textContent = `-${risk.toFixed(2)} pts`;
+    }
+    
+    function confirmOrder() {
+      if (!entryPrice || !tpPrice || !slPrice) {
+        alert('Please set Entry, TP, and SL prices');
+        return;
+      }
+      
+      const qty = parseFloat(document.getElementById('quantity').value);
+      ws.send(JSON.stringify({ 
+        action: 'place_order', 
+        side: pendingOrderMode, 
+        quantity: qty,
+        price: entryPrice,
+        tp: tpPrice,
+        sl: slPrice
+      }));
+      
+      document.getElementById('order-status').innerHTML = '✅ Order confirmed!';
+      setTimeout(() => {
+        cancelPendingOrder();
+      }, 1000);
+    }
+    
+    function updateButtonStates() {
+      const buyBtn = document.getElementById('btn-buy');
+      const sellBtn = document.getElementById('btn-sell');
+      
+      if (pendingOrderMode === 'buy') {
+        buyBtn.style.opacity = '1';
+        buyBtn.style.border = '3px solid #1a7a6f';
+        buyBtn.style.boxShadow = '0 0 10px rgba(38, 166, 154, 0.5)';
+        sellBtn.style.opacity = '0.4';
+        sellBtn.style.border = 'none';
+        sellBtn.style.boxShadow = 'none';
+      } else if (pendingOrderMode === 'sell') {
+        sellBtn.style.opacity = '1';
+        sellBtn.style.border = '3px solid #c62828';
+        sellBtn.style.boxShadow = '0 0 10px rgba(239, 83, 80, 0.5)';
+        buyBtn.style.opacity = '0.4';
+        buyBtn.style.border = 'none';
+        buyBtn.style.boxShadow = 'none';
+      } else {
+        buyBtn.style.opacity = '1';
+        buyBtn.style.border = 'none';
+        buyBtn.style.boxShadow = 'none';
+        sellBtn.style.opacity = '1';
+        sellBtn.style.border = 'none';
+        sellBtn.style.boxShadow = 'none';
+      }
+    }
+    
+    // Chart click handler
+    chart.subscribeClick((param) => {
+      if (!pendingOrderMode || !param.point) return;
+      if (entryPrice !== null) return; // Already set entry
+      
+      const price = candleSeries.coordinateToPrice(param.point.y);
+      if (!price) return;
+      
+      setEntryPrice(price);
+    });
+    
+    function addMarker(position) {
+      const side = position.side;
+      const price = parseFloat(position.entry_price);
+      const tp = position.tp ? parseFloat(position.tp) : null;
+      const sl = position.sl ? parseFloat(position.sl) : null;
+      const posId = position.id;
+      
+      markers.push({
+        time: position.time,
+        position: side === 'buy' ? 'belowBar' : 'aboveBar',
+        color: side === 'buy' ? '#26a69a' : '#ef5350',
+        shape: side === 'buy' ? 'arrowUp' : 'arrowDown',
+        text: (side === 'buy' ? '🟢 LONG' : '🔴 SHORT') + ' @ ' + price.toFixed(2),
+        size: 2
+      });
+      candleSeries.setMarkers(markers);
+      
+      // Store lines for this position
+      positionLines[posId] = { entry: null, tp: null, sl: null };
+      
+      // Add entry price line (solid line for filled orders)
+      positionLines[posId].entry = candleSeries.createPriceLine({
+        price: price,
+        color: side === 'buy' ? '#2196F3' : '#FF5722',
+        lineWidth: 2,
+        lineStyle: 0, // solid
+        axisLabelVisible: true,
+        title: `Entry ${price.toFixed(2)}`
+      });
+      
+      // Add TP line
+      if (tp) {
+        positionLines[posId].tp = candleSeries.createPriceLine({
+          price: tp,
+          color: '#4CAF50',
+          lineWidth: 2,
+          lineStyle: 0,
+          axisLabelVisible: true,
+          title: `TP ${tp.toFixed(2)}`
+        });
+      }
+      
+      // Add SL line
+      if (sl) {
+        positionLines[posId].sl = candleSeries.createPriceLine({
+          price: sl,
+          color: '#F44336',
+          lineWidth: 2,
+          lineStyle: 0,
+          axisLabelVisible: true,
+          title: `SL ${sl.toFixed(2)}`
+        });
+      }
+      
+      // Draw zones
+      drawZones();
+    }
+    
+    function updatePositionList() {
+      const list = document.getElementById('positions-list');
+      if (positions.length === 0) {
+        list.innerHTML = '<div style="color: #999;">No open positions</div>';
+        return;
+      }
+      
+      list.innerHTML = positions.map(p => {
+        const entryPrice = parseFloat(p.entry_price);
+        const qty = parseFloat(p.quantity);
+        const pnl = (currentPrice - entryPrice) * qty * (p.side === 'buy' ? 1 : -1);
+        const pnlColor = pnl >= 0 ? '#26a69a' : '#ef5350';
+        return `
+          <div style="padding: 5px; margin: 5px 0; border: 1px solid #ddd;">
+            <div><strong>${p.side.toUpperCase()}</strong> ${qty} @ ${entryPrice.toFixed(2)}</div>
+            <div style="color: ${pnlColor}">P&L: ${pnl.toFixed(2)}</div>
+            <button onclick="closePosition(${p.id})" style="font-size: 11px;">Close</button>
+          </div>
+        `;
+      }).join('');
+    }
+    
+    function updatePnL() {
+      if (positions.length === 0) {
+        document.getElementById('pnl-summary').innerHTML = 'Total P&L: 0.00';
+        return;
+      }
+      
+      const totalPnL = positions.reduce((sum, p) => {
+        return sum + (currentPrice - parseFloat(p.entry_price)) * parseFloat(p.quantity) * (p.side === 'buy' ? 1 : -1);
+      }, 0);
+      
+      const color = totalPnL >= 0 ? '#26a69a' : '#ef5350';
+      document.getElementById('pnl-summary').innerHTML = 
+        `Total P&L: <span style="color: ${color}">${totalPnL.toFixed(2)}</span>`;
+    }
+    
+    function closePosition(id) {
+      ws.send(JSON.stringify({ action: 'close_position', position_id: id }));
+    }
+    
+    function closeAllPositions() {
+      positions.forEach(p => closePosition(p.id));
+    }
+
+    document.getElementById('btn-load').onclick = () => {
+      ws.send(JSON.stringify({ action: 'load', file: 'data/temp.json' }));
+    };
+    document.getElementById('btn-start').onclick = () => ws.send(JSON.stringify({ action: 'start' }));
+    document.getElementById('btn-stop').onclick = () => ws.send(JSON.stringify({ action: 'stop' }));
+    document.getElementById('speed').onchange = (e) => ws.send(JSON.stringify({ action: 'set_speed', speed: parseFloat(e.target.value) }));
+    
+    // Trading buttons - hold Shift to place at current price, click normally to select price on chart
+    document.getElementById('btn-buy').onclick = (e) => {
+      if (pendingOrderMode === 'buy') {
+        cancelPendingOrder();
+      } else {
+        enablePendingOrder('buy');
+      }
+    };
+    document.getElementById('btn-sell').onclick = (e) => {
+      if (pendingOrderMode === 'sell') {
+        cancelPendingOrder();
+      } else {
+        enablePendingOrder('sell');
+      }
+    };
+    document.getElementById('btn-close-all').onclick = closeAllPositions;
+    document.getElementById('btn-cancel-order').onclick = cancelPendingOrder;
+    document.getElementById('btn-confirm-order').onclick = confirmOrder;
+    
+    // TP/SL input listeners
+    document.getElementById('tp-price').oninput = (e) => {
+      tpPrice = parseFloat(e.target.value) || null;
+      updateTPSLLines();
+      updateRRRatio();
+    };
+    document.getElementById('sl-price').oninput = (e) => {
+      slPrice = parseFloat(e.target.value) || null;
+      updateTPSLLines();
+      updateRRRatio();
+    };
+    
+    // Initial update
+    updatePositionList();
+    updatePnL();
+    updateButtonStates();
+  </script>
+</body>
+</html>
