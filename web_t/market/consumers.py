@@ -86,15 +86,28 @@ class BacktestConsumer(AsyncJsonWebsocketConsumer):
                 
                 self.data = []
                 for i in range(len(times)):
+                    time_val = float(times[i])
+                    # Convert ms to seconds if needed (check if time is in milliseconds)
+                    if time_val > 10000000000:  # timestamp is in milliseconds
+                        time_val = int(time_val / 1000)
+                    else:
+                        time_val = int(time_val)
+                    
                     self.data.append({
-                        'time': times[i] / 1000,  # convert ms to seconds
-                        'open': opens[i],
-                        'high': highs[i],
-                        'low': lows[i],
-                        'close': closes[i]
+                        'time': time_val,
+                        'open': float(opens[i]),
+                        'high': float(highs[i]),
+                        'low': float(lows[i]),
+                        'close': float(closes[i])
                     })
+                
+                # Sort by time ascending (oldest first)
+                self.data.sort(key=lambda x: x['time'])
             else:
                 self.data = raw_data
+                # Ensure sorted
+                if isinstance(self.data, list) and len(self.data) > 0:
+                    self.data.sort(key=lambda x: x.get('time', 0))
                 
             self.pointer = 0
         except Exception as e:
@@ -133,7 +146,18 @@ class BacktestConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json({"status": "error", "message": str(e)})
 
     async def send_candle(self, event):
-        await self.send_json({"type": "candle", "data": event["candle"]})
+        candle = event["candle"]
+        # Ensure all values are proper types for JSON serialization
+        await self.send_json({
+            "type": "candle", 
+            "data": {
+                'time': int(candle['time']),
+                'open': float(candle['open']),
+                'high': float(candle['high']),
+                'low': float(candle['low']),
+                'close': float(candle['close'])
+            }
+        })
     
     async def place_order(self, side, quantity, price, tp=None, sl=None):
         position = {

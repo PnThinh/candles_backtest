@@ -21,6 +21,31 @@
         Speed: <input id="speed" type="number" value="1" min="0.1" step="0.1" style="width:80px"/>
       </div>
       
+        <!-- Load panel (hidden) -->
+        <div id="load-panel" style="display:none; padding:10px; border:1px solid #ddd; background:#fff; position: absolute; z-index: 30; left: 20px; top: 60px;">
+          <h4 style="margin:0 0 8px 0">Load data from API</h4>
+          <div style="margin-bottom:6px;">
+            Symbol: <input id="load-symbol" type="text" value="EUR/USD" style="width:140px"/>
+          </div>
+          <div style="margin-bottom:6px;">
+            Interval: <input id="load-interval" type="text" value="4h" style="width:80px"/>
+          </div>
+          <div style="margin-bottom:6px;">
+            Start date: <input id="load-start" type="date" />
+          </div>
+          <div style="margin-bottom:6px;">
+            End date: <input id="load-end" type="date" />
+          </div>
+          <div style="margin-bottom:6px;">
+            API key (optional): <input id="load-apikey" type="text" placeholder="use server default" style="width:220px"/>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <button id="load-submit">Fetch & Save</button>
+            <button id="load-cancel">Cancel</button>
+          </div>
+          <div id="load-msg" style="margin-top:6px; font-size:12px;color:#666;"></div>
+        </div>
+      
       <!-- Trading controls -->
       <div style="margin-top: 10px; padding: 10px; border: 1px solid #ccc; background: #f9f9f9;">
         <h4 style="margin-top: 0;">Trading Setup</h4>
@@ -85,9 +110,18 @@
       width: 1000, 
       height: 500,
       handleScroll: { mouseWheel: true, pressedMouseMove: true },
-      handleScale: { mouseWheel: true, pinch: true }
+      handleScale: { mouseWheel: true, pinch: true },
+      localization: {
+        priceFormatter: price => price.toFixed(5)
+      }
     });
-    const candleSeries = chart.addCandlestickSeries();
+    const candleSeries = chart.addCandlestickSeries({
+      priceFormat: {
+        type: 'price',
+        precision: 5,
+        minMove: 0.00001
+      }
+    });
     
     // Canvas overlay for drawing zones
     const canvas = document.getElementById('overlay-canvas');
@@ -102,6 +136,7 @@
     let pendingOrderMode = null; // 'buy' or 'sell'
     let wasRunningBeforeOrder = false;
     let isChartRunning = false; // Track chart running state
+    let priceDecimals = 2; // Auto-detected precision
     
     // Order setup lines
     let entryLine = null;
@@ -121,6 +156,17 @@
       } catch (e) {
         return null;
       }
+    }
+    
+    function detectPriceDecimals(price) {
+      const priceStr = price.toString();
+      const decimalIndex = priceStr.indexOf('.');
+      if (decimalIndex === -1) return 0;
+      return priceStr.length - decimalIndex - 1;
+    }
+    
+    function formatPrice(price) {
+      return price.toFixed(priceDecimals);
     }
     
     function drawZones() {
@@ -213,6 +259,26 @@
           close: c.close
         });
         currentPrice = c.close;
+        // Auto-detect decimal places from first candle
+        if (priceDecimals === 2) {
+          priceDecimals = Math.max(
+            detectPriceDecimals(c.open),
+            detectPriceDecimals(c.close)
+          );
+          // Update chart precision
+          candleSeries.applyOptions({
+            priceFormat: {
+              type: 'price',
+              precision: priceDecimals,
+              minMove: Math.pow(10, -priceDecimals)
+            }
+          });
+          chart.applyOptions({
+            localization: {
+              priceFormatter: price => price.toFixed(priceDecimals)
+            }
+          });
+        }
         updatePnL();
         drawZones(); // Redraw zones on each candle update
       } else if (msg.status === 'started') {
@@ -221,6 +287,10 @@
       } else if (msg.status === 'stopped') {
         isChartRunning = false;
         console.log('Chart stopped');
+      } else if (msg.status === 'loaded') {
+        // Data loaded - clear chart and reset precision
+        clearChartData();
+        console.log('Data loaded, total candles:', msg.total);
       } else if (msg.type === 'order_placed') {
         positions.push(msg.position);
         addMarker(msg.position);
@@ -405,7 +475,7 @@
     
     function setEntryPrice(price) {
       entryPrice = price;
-      document.getElementById('entry-price').value = price.toFixed(2);
+      document.getElementById('entry-price').value = formatPrice(price);
       
       // Create entry line
       if (entryLine) candleSeries.removePriceLine(entryLine);
@@ -428,8 +498,8 @@
         slPrice = price + defaultRisk;
       }
       
-      document.getElementById('tp-price').value = tpPrice.toFixed(2);
-      document.getElementById('sl-price').value = slPrice.toFixed(2);
+      document.getElementById('tp-price').value = formatPrice(tpPrice);
+      document.getElementById('sl-price').value = formatPrice(slPrice);
       
       updateTPSLLines();
       updateRRRatio();
@@ -483,8 +553,8 @@
       document.getElementById('rr-ratio').textContent = `1:${rrRatio}`;
       document.getElementById('rr-ratio').style.color = rrRatio >= 2 ? '#4CAF50' : '#F44336';
       
-      document.getElementById('tp-pips').textContent = `+${reward.toFixed(2)} pts`;
-      document.getElementById('sl-pips').textContent = `-${risk.toFixed(2)} pts`;
+      document.getElementById('tp-pips').textContent = `+${formatPrice(reward)} pts`;
+      document.getElementById('sl-pips').textContent = `-${formatPrice(risk)} pts`;
     }
     
     function confirmOrder() {
@@ -560,7 +630,7 @@
         position: side === 'buy' ? 'belowBar' : 'aboveBar',
         color: side === 'buy' ? '#26a69a' : '#ef5350',
         shape: side === 'buy' ? 'arrowUp' : 'arrowDown',
-        text: (side === 'buy' ? '🟢 LONG' : '🔴 SHORT') + ' @ ' + price.toFixed(2),
+        text: (side === 'buy' ? '🟢 LONG' : '🔴 SHORT') + ' @ ' + formatPrice(price),
         size: 2
       });
       candleSeries.setMarkers(markers);
@@ -575,7 +645,7 @@
         lineWidth: 2,
         lineStyle: 0, // solid
         axisLabelVisible: true,
-        title: `Entry ${price.toFixed(2)}`
+        title: `Entry ${formatPrice(price)}`
       });
       
       // Add TP line
@@ -586,7 +656,7 @@
           lineWidth: 2,
           lineStyle: 0,
           axisLabelVisible: true,
-          title: `TP ${tp.toFixed(2)}`
+          title: `TP ${formatPrice(tp)}`
         });
       }
       
@@ -598,7 +668,7 @@
           lineWidth: 2,
           lineStyle: 0,
           axisLabelVisible: true,
-          title: `SL ${sl.toFixed(2)}`
+          title: `SL ${formatPrice(sl)}`
         });
       }
       
@@ -620,7 +690,7 @@
         const pnlColor = pnl >= 0 ? '#26a69a' : '#ef5350';
         return `
           <div style="padding: 5px; margin: 5px 0; border: 1px solid #ddd;">
-            <div><strong>${p.side.toUpperCase()}</strong> ${qty} @ ${entryPrice.toFixed(2)}</div>
+            <div><strong>${p.side.toUpperCase()}</strong> ${qty} @ ${formatPrice(entryPrice)}</div>
             <div style="color: ${pnlColor}">P&L: ${pnl.toFixed(2)}</div>
             <button onclick="closePosition(${p.id})" style="font-size: 11px;">Close</button>
           </div>
@@ -650,9 +720,97 @@
     function closeAllPositions() {
       positions.forEach(p => closePosition(p.id));
     }
+    
+    function clearChartData() {
+      // Clear all series data
+      candleSeries.setData([]);
+      
+      // Clear markers
+      markers = [];
+      candleSeries.setMarkers([]);
+      
+      // Clear all position lines
+      Object.values(positionLines).forEach(lines => {
+        if (lines.entry) candleSeries.removePriceLine(lines.entry);
+        if (lines.tp) candleSeries.removePriceLine(lines.tp);
+        if (lines.sl) candleSeries.removePriceLine(lines.sl);
+      });
+      positionLines = {};
+      
+      // Clear order setup lines
+      clearOrderLines();
+      
+      // Reset positions
+      positions = [];
+      updatePositionList();
+      updatePnL();
+      
+      // Reset precision detection
+      priceDecimals = 2;
+      
+      // Clear canvas overlay
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
 
     document.getElementById('btn-load').onclick = () => {
-      ws.send(JSON.stringify({ action: 'load', file: 'data/temp.json' }));
+      const panel = document.getElementById('load-panel');
+      panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
+    };
+
+    document.getElementById('load-cancel').onclick = () => {
+      const panel = document.getElementById('load-panel');
+      panel.style.display = 'none';
+      document.getElementById('load-msg').textContent = '';
+    };
+
+    document.getElementById('load-submit').onclick = async () => {
+      const symbol = document.getElementById('load-symbol').value;
+      const interval = document.getElementById('load-interval').value;
+      const start = document.getElementById('load-start').value;
+      const end = document.getElementById('load-end').value;
+      const apikey = document.getElementById('load-apikey').value;
+      const msg = document.getElementById('load-msg');
+      msg.style.color = '#666';
+      if (!symbol || !interval || !start || !end) {
+        msg.style.color = '#c62828';
+        msg.textContent = 'Please fill symbol, interval, start and end.';
+        return;
+      }
+      msg.textContent = 'Fetching...';
+      try {
+        const res = await fetch('/api/load-data/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol, interval, start, end, apikey })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          msg.style.color = '#c62828';
+          msg.textContent = data.message || JSON.stringify(data);
+          return;
+        }
+        msg.style.color = '#2e7d32';
+        msg.textContent = 'Saved to server: ' + data.file;
+
+        // Clear chart before loading new data
+        clearChartData();
+        
+        // Tell websocket consumer to load the saved file
+        try {
+          ws.send(JSON.stringify({ action: 'load', file: 'data/temp.json' }));
+        } catch (e) {
+          console.warn('ws send failed', e);
+        }
+
+        // close panel after a short delay
+        setTimeout(() => {
+          document.getElementById('load-panel').style.display = 'none';
+          document.getElementById('load-msg').textContent = '';
+        }, 800);
+      } catch (err) {
+        msg.style.color = '#c62828';
+        msg.textContent = 'Error: ' + err;
+      }
     };
     document.getElementById('btn-start').onclick = () => ws.send(JSON.stringify({ action: 'start' }));
     document.getElementById('btn-stop').onclick = () => ws.send(JSON.stringify({ action: 'stop' }));
